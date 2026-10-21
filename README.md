@@ -1,4 +1,4 @@
-===== PRESCAN - PROGRAM ABSENSI SISWA =====
+===== PRESENSCAN - PROGRAM ABSENSI SISWA =====
 
 Cara pakai: 
 1. Run file app.py
