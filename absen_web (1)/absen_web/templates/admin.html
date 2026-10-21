@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Admin — Auto Absen</title>
+<style>
+  :root { --bg:#f4f6f8; --card:#fff; --text:#1c2330; --muted:#6b7686; --line:#e2e6ec; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#12161c; --card:#1b212a; --text:#e8ecf2; --muted:#93a0b2; --line:#2a3240; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:system-ui,sans-serif; background:var(--bg); color:var(--text); }
+  main { max-width:760px; margin:0 auto; padding:16px; display:grid; gap:16px; }
+  header { display:flex; justify-content:space-between; align-items:center; gap:8px; flex-wrap:wrap; }
+  h1 { margin:0; font-size:1.4rem; }
+  h2 { margin:0 0 10px; font-size:1rem; color:var(--muted); font-weight:600; }
+  a { color:#2563eb; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  select, input, button { font:inherit; padding:8px 10px; border-radius:8px;
+    border:1px solid var(--line); background:var(--card); color:var(--text); }
+  button { background:#2563eb; color:#fff; border:0; cursor:pointer; }
+  button.gray { background:var(--line); color:var(--text); }
+  button.red { background:#dc2626; }
+  button:disabled { opacity:.5; cursor:default; }
+  table { width:100%; border-collapse:collapse; font-size:.92rem; margin-top:10px; }
+  th, td { text-align:left; padding:7px 4px; border-bottom:1px solid var(--line); }
+  th { color:var(--muted); font-weight:600; }
+  .done { color:#15803d; font-weight:600; }
+  #msg { padding:10px 12px; border-radius:8px; display:none; }
+  #msg.ok { display:block; background:#d8f5e0; color:#0b5a25; }
+  #msg.err { display:block; background:#fde0e0; color:#8a1c1c; }
+  #msg.warn { display:block; background:#fff3cd; color:#7a5a00; }
+  .login { max-width:340px; margin:60px auto; }
+</style>
+</head>
+<body>
+<main>
+{% if not logged_in %}
+  <section class="card login">
+    <h1>Login Admin</h1>
+    <p id="msg"></p>
+    <div class="row">
+      <input type="password" id="pw" placeholder="Password" autofocus style="flex:1">
+      <button id="loginBtn">Masuk</button>
+    </div>
+    <p><a href="/">← Kembali ke scanner</a></p>
+  </section>
+{% else %}
+  <header>
+    <h1>Admin Panel</h1>
+    <div class="row">
+      <a href="/">← Scanner</a>
+      <button class="gray" id="logoutBtn">Logout</button>
+    </div>
+  </header>
+
+  <div id="msg"></div>
+
+  <section class="card">
+    <h2>Absen manual (hari ini)</h2>
+    <div class="row">
+      <select id="class"></select>
+      <input id="search" placeholder="Cari nama / NIS" style="flex:1">
+    </div>
+    <table>
+      <thead><tr><th>No.</th><th>Nama</th><th>NIS</th><th>Status</th></tr></thead>
+      <tbody id="list"></tbody>
+    </table>
+  </section>
+
+  <section class="card">
+    <h2>Reset absen</h2>
+    <p style="margin-top:0">Mengosongkan seluruh isi <b>FileAbsen.xlsx</b> (header tetap) dan menghapus
+       absen <b>hari ini</b> dari database. Riwayat hari sebelumnya tidak dihapus.</p>
+    <button class="red" id="resetBtn">Reset absen hari ini</button>
+  </section>
+{% endif %}
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+
+function msg(cls, text) {
+  const m = $("msg"); m.className = cls; m.textContent = text;
+}
+
+async function post(url, body) {
+  const res = await fetch(url, {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(body || {})
+  });
+  let data = {}; try { data = await res.json(); } catch (e) {}
+  if (res.status === 401 && data.status === "unauthorized") location.reload();  // sesi habis
+  return {res, data};
+}
+
+{% if not logged_in %}
+async function login() {
+  $("loginBtn").disabled = true;
+  const {res} = await post("/admin/login", {password: $("pw").value});
+  if (res.ok) return location.reload();
+  msg("err", "Password salah.");
+  $("loginBtn").disabled = false; $("pw").select();
+}
+$("loginBtn").onclick = login;
+$("pw").onkeydown = e => { if (e.key === "Enter") login(); };
+{% else %}
+async function loadStudents() {
+  const res = await fetch("/api/admin/students?class=" + encodeURIComponent($("class").value));
+  if (res.status === 401) return location.reload();
+  const rows = await res.json();
+  const q = $("search").value.toLowerCase();
+  const tbody = $("list"); tbody.innerHTML = "";
+  for (const r of rows) {
+    if (q && !(r.name.toLowerCase().includes(q) || r.nis.includes(q))) continue;
+    const tr = document.createElement("tr");
+    for (const v of [r.absence_number, r.name, r.nis]) {
+      const td = document.createElement("td"); td.textContent = v; tr.appendChild(td);
+    }
+    const st = document.createElement("td");
+    if (r.time) {
+      st.className = "done"; st.textContent = "✔ Hadir " + r.time;
+    } else {
+      const b = document.createElement("button"); b.textContent = "Hadirkan";
+      b.onclick = () => markPresent(r.nis, r.name, b);
+      st.appendChild(b);
+    }
+    tr.appendChild(st); tbody.appendChild(tr);
+  }
+  if (!tbody.children.length) tbody.innerHTML = '<tr><td colspan="4">Tidak ada siswa.</td></tr>';
+}
+
+async function markPresent(nis, name, btn) {
+  if (!confirm("Tandai " + name + " HADIR?")) return;
+  btn.disabled = true;
+  const {data} = await post("/api/admin/mark", {nis});
+  if (data.status === "ok" && data.excel === false)
+    msg("warn", name + " tercatat di database, tapi Excel gagal ditulis (tutup FileAbsen.xlsx di Excel).");
+  else if (data.status === "ok") msg("ok", name + " ditandai HADIR (" + data.time + ") dan masuk ke Excel.");
+  else if (data.status === "duplicate") msg("warn", name + " sudah absen jam " + data.time + ".");
+  else msg("err", "Gagal menandai " + name + ".");
+  loadStudents();
+}
+
+$("resetBtn").onclick = async () => {
+  if (!confirm("Yakin reset? Isi FileAbsen.xlsx dikosongkan dan absen hari ini dihapus.")) return;
+  const {res, data} = await post("/api/admin/reset");
+  if (res.ok) msg("ok", "Reset selesai. " + data.deleted + " data absen hari ini dihapus, Excel dikosongkan.");
+  else if (data.status === "excel_locked")
+    msg("err", "Gagal: FileAbsen.xlsx sedang dibuka di Excel. Tutup dulu, lalu coba lagi. (Tidak ada data yang dihapus.)");
+  else msg("err", "Reset gagal.");
+  loadStudents();
+};
+
+$("logoutBtn").onclick = async () => { await post("/admin/logout"); location.reload(); };
+$("class").onchange = loadStudents;
+$("search").oninput = loadStudents;
+
+(async () => {
+  const classes = await (await fetch("/api/classes")).json();
+  for (const c of classes) $("class").add(new Option(c, c));
+  if (!classes.length) msg("warn", "Belum ada siswa di database.");
+  loadStudents();
+})();
+{% endif %}
+</script>
+</body>
+</html>

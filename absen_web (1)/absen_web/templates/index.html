@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Auto Absen QR</title>
+<style>
+  :root { --bg:#f4f6f8; --card:#fff; --text:#1c2330; --muted:#6b7686; --line:#e2e6ec; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#12161c; --card:#1b212a; --text:#e8ecf2; --muted:#93a0b2; --line:#2a3240; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:system-ui,sans-serif; background:var(--bg); color:var(--text); }
+  main { max-width:960px; margin:0 auto; padding:16px; display:grid; gap:16px;
+         grid-template-columns:1fr 1fr; }
+  @media (max-width:720px) { main { grid-template-columns:1fr; } }
+  h1 { grid-column:1/-1; margin:0; font-size:1.4rem; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px; }
+  h2 { margin:0 0 10px; font-size:1rem; color:var(--muted); font-weight:600; }
+  #canvas { width:100%; display:block; border-radius:8px; background:#0b0f14; aspect-ratio:16/9; }
+  #video { position:absolute; width:1px; height:1px; opacity:0; pointer-events:none; }
+  #result { margin-top:12px; padding:14px; border-radius:8px; text-align:center;
+            background:var(--bg); min-height:84px; }
+  #result.ok { background:#d8f5e0; color:#0b5a25; }
+  #result.dup { background:#fff3cd; color:#7a5a00; }
+  #result.err { background:#fde0e0; color:#8a1c1c; }
+  #result .big { font-size:1.3rem; font-weight:700; }
+  table { width:100%; border-collapse:collapse; font-size:.9rem; }
+  th, td { text-align:left; padding:6px 4px; border-bottom:1px solid var(--line); }
+  th { color:var(--muted); font-weight:600; }
+  .list { max-height:340px; overflow:auto; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  select, input, button { font:inherit; padding:8px 10px; border-radius:8px;
+    border:1px solid var(--line); background:var(--card); color:var(--text); }
+  button { background:#2563eb; color:#fff; border:0; cursor:pointer; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Auto Absen — Scan QR Kartu Pelajar <a href="/admin" style="font-size:.85rem;font-weight:400;margin-left:8px">Admin</a></h1>
+
+  <section class="card">
+    <h2>Scanner</h2>
+    <video id="video" playsinline muted></video>
+    <canvas id="canvas" width="1280" height="720"></canvas>
+    <div class="row" style="margin-top:12px">
+      <button id="scanBtn" style="flex:1">Mulai Scan</button>
+    </div>
+    <div id="result">Tekan "Mulai Scan", lalu arahkan QR kartu ke kamera</div>
+  </section>
+
+  <section class="card">
+    <h2>Hadir hari ini (<span id="count">0</span>)</h2>
+    <div class="list">
+      <table>
+        <thead><tr><th>No.</th><th>Nama</th><th>Kelas</th><th>Jam</th></tr></thead>
+        <tbody id="list"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="card" style="grid-column:1/-1">
+    <h2>Download rekap Excel</h2>
+    <div class="row">
+      <select id="class"></select>
+      <input type="date" id="date">
+      <button id="dl">Download FileAbsen.xlsx</button>
+    </div>
+  </section>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const resultBox = $("result");
+const video = $("video"), canvas = $("canvas"), ctx = canvas.getContext("2d");
+const work = document.createElement("canvas");
+const wctx = work.getContext("2d", {willReadFrequently: true});
+let stream = null, scanning = false, starting = false, detector = null;
+
+function show(cls, title, detail) {
+  resultBox.className = cls;
+  resultBox.innerHTML = "";
+  const t = document.createElement("div"); t.className = "big"; t.textContent = title;
+  const d = document.createElement("div"); d.textContent = detail || "";
+  resultBox.append(t, d);
+}
+
+function blank() {
+  ctx.fillStyle = "#0b0f14"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+}
+
+// ---------- kamera ----------
+async function startScan() {
+  if (starting || scanning) return;
+  starting = true; $("scanBtn").disabled = true;
+  try {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia)
+      throw new Error("Kamera butuh localhost atau HTTPS");
+    detector = null;
+    try { if ("BarcodeDetector" in window) detector = new BarcodeDetector({formats: ["qr_code"]}); } catch (e) {}
+    if (!detector && typeof jsQR === "undefined")
+      throw new Error("Library scanner gagal dimuat (butuh internet untuk jsDelivr)");
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: {facingMode: "environment", width: {ideal: 1920}, height: {ideal: 1080}}
+    });
+    video.srcObject = stream;
+    await video.play();
+    try { await stream.getVideoTracks()[0].applyConstraints({advanced: [{focusMode: "continuous"}]}); } catch (e) {}
+    canvas.width = video.videoWidth; canvas.height = video.videoHeight;
+    scanning = true;
+    $("scanBtn").textContent = "Berhenti";
+    show("", "Memindai...", "Arahkan QR kartu ke dalam kotak");
+    loop();
+  } catch (err) {
+    stopCamera();
+    show("err", "Kamera tidak bisa dibuka", String(err.message || err));
+  } finally {
+    starting = false; $("scanBtn").disabled = false;
+  }
+}
+
+function stopCamera() {
+  scanning = false;
+  if (stream) stream.getTracks().forEach(t => t.stop());
+  stream = null; video.srcObject = null;
+  $("scanBtn").textContent = "Mulai Scan";
+}
+
+function stopScan() { stopCamera(); blank(); }
+
+// ---------- gambar ke canvas ----------
+function drawFrame() {
+  const w = canvas.width, h = canvas.height;
+  ctx.drawImage(video, 0, 0, w, h);
+  const box = Math.floor(Math.min(w, h) * 0.6);          // kotak panduan seperti kode OpenCV
+  const x = (w - box) / 2, y = (h - box) / 2;
+  ctx.strokeStyle = "#00ff00"; ctx.lineWidth = Math.max(3, w / 400);
+  ctx.strokeRect(x, y, box, box);
+  ctx.fillStyle = "#00ff00"; ctx.font = `bold ${Math.round(w / 45)}px sans-serif`;
+  ctx.fillText("Arahkan QR ke dalam kotak", 20, Math.round(w / 32));
+}
+
+function drawQrBox(pts, text) {
+  ctx.strokeStyle = "#00ff00"; ctx.lineWidth = Math.max(5, canvas.width / 250);
+  ctx.beginPath();
+  pts.forEach((p, i) => i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1]));
+  ctx.closePath(); ctx.stroke();
+  ctx.fillStyle = "#00ff00"; ctx.font = `bold ${Math.round(canvas.width / 45)}px sans-serif`;
+  ctx.fillText("NIS: " + text.slice(0, 40), 20, Math.round(canvas.width / 16));
+}
+
+// ---------- deteksi ----------
+async function decodeFrame() {
+  if (detector) {
+    try {
+      const r = await detector.detect(video);
+      if (r.length && r[0].rawValue)
+        return {text: r[0].rawValue, pts: r[0].cornerPoints.map(p => [p.x, p.y])};
+      return null;
+    } catch (e) { detector = null; }   // jatuh ke jsQR kalau detektor bawaan bermasalah
+  }
+  if (typeof jsQR === "undefined") return null;
+  const scale = Math.min(1, 1280 / canvas.width);
+  work.width = Math.round(canvas.width * scale); work.height = Math.round(canvas.height * scale);
+  wctx.drawImage(video, 0, 0, work.width, work.height);
+  const img = wctx.getImageData(0, 0, work.width, work.height);
+  const c = jsQR(img.data, img.width, img.height, {inversionAttempts: "dontInvert"});
+  if (!c || !c.data) return null;
+  const l = c.location;
+  return {
+    text: c.data,
+    pts: [l.topLeftCorner, l.topRightCorner, l.bottomRightCorner, l.bottomLeftCorner]
+      .map(p => [p.x / scale, p.y / scale])
+  };
+}
+
+async function loop() {
+  if (!scanning) return;
+  drawFrame();
+  const hit = await decodeFrame();
+  if (!scanning) return;
+  if (hit) {
+    drawQrBox(hit.pts, hit.text);   // kotak hijau di sekitar QR, frame dibekukan
+    stopCamera();                   // berhenti scan SEGERA setelah QR terdeteksi
+    submitScan(hit.text.trim());
+    return;
+  }
+  requestAnimationFrame(loop);
+}
+
+// ---------- kirim ke server ----------
+async function submitScan(nis) {
+  show("", "QR terdeteksi", "Memeriksa database...");
+  try {
+    const res = await fetch("/api/scan", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({nis})
+    });
+    const d = await res.json();
+    if (d.status === "ok" && d.excel === false)
+      show("dup", "Tercatat, tapi Excel gagal: " + d.name,
+        "Tutup FileAbsen.xlsx di Excel, lalu download rekap dari tombol di bawah.");
+    else if (d.status === "ok")
+      show("ok", "✔ HADIR: " + d.name, `No. ${d.absence_number} · ${d.class_name} · NIS ${d.nis} · ${d.time} · Excel ✔`);
+    else if (d.status === "duplicate")
+      show("dup", "Sudah absen: " + d.name, `Tercatat jam ${d.time}`);
+    else
+      show("err", "ERROR: QR tidak dikenali",
+        `Isi QR "${nis.slice(0, 60)}" tidak ada di database siswa.`);
+    loadToday();
+  } catch (e) {
+    show("err", "Gagal terhubung ke server", "Pastikan python app.py masih berjalan.");
+  }
+}
+
+async function loadToday() {
+  const rows = await (await fetch("/api/today")).json();
+  $("count").textContent = rows.length;
+  const tbody = $("list"); tbody.innerHTML = "";
+  for (const r of rows) {
+    const tr = document.createElement("tr");
+    for (const v of [r.absence_number, r.name, r.class_name, r.time]) {
+      const td = document.createElement("td"); td.textContent = v; tr.appendChild(td);
+    }
+    tbody.appendChild(tr);
+  }
+}
+
+async function init() {
+  // Pasang tombol dulu, supaya tetap berfungsi walau langkah lain gagal
+  $("scanBtn").onclick = () => scanning ? stopScan() : startScan();
+  $("dl").onclick = () => {
+    if (!$("class").value) return alert("Belum ada data kelas di database.");
+    location.href = `/download?class=${encodeURIComponent($("class").value)}&date=${$("date").value}`;
+  };
+  $("date").value = new Date().toLocaleDateString("sv-SE");  // YYYY-MM-DD lokal
+  try {
+    const classes = await (await fetch("/api/classes")).json();
+    for (const c of classes) $("class").add(new Option(c, c));
+    await loadToday();
+  } catch (e) {
+    show("err", "Tidak bisa terhubung ke server",
+      "Buka lewat http://localhost:5000 (jalankan python app.py), bukan klik file index.html langsung.");
+  }
+}
+init();
+</script>
+</body>
+</html>

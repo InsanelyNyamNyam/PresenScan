@@ -1,0 +1,3 @@
+flask
+openpyxl
+cryptography  # hanya untuk mode --https
